@@ -133,5 +133,23 @@
     "inspiredBy": "hands-free voice assistants, made local",
     "sourceDownloadsPerMonth": null,
     "install": "rpi install rpi-voice"
+  },
+  {
+    "name": "rpi-simplify",
+    "version": "0.1.3",
+    "type": "extension",
+    "tool": "simplify",
+    "inspiredBy": "code review extensions",
+    "sourceDownloadsPerMonth": null,
+    "install": "rpi install rpi-simplify"
+  },
+  {
+    "name": "rpi-memory",
+    "version": "0.1.3",
+    "type": "extension",
+    "tool": "memory",
+    "inspiredBy": "Pi memory extensions",
+    "sourceDownloadsPerMonth": null,
+    "install": "rpi install rpi-memory"
   }
 ]

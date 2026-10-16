@@ -52,7 +52,7 @@ tasks:
       - cargo test --manifest-path tools/rpi-package-smoke/Cargo.toml -- --ignored --nocapture
 
   publish-dry-run:
-    desc: Verify all 22 extensions can be packaged for crates.io
+    desc: Verify all 18 extensions can be packaged for crates.io
     cmds:
       - task: test
       - cargo publish --dry-run --allow-dirty -p rpi-mcp-adapter
@@ -71,6 +71,8 @@ tasks:
       - cargo publish --dry-run --allow-dirty -p rpi-server
       - cargo publish --dry-run --allow-dirty -p rpi-voice
       - cargo publish --dry-run --allow-dirty -p rpi-run-stats
+      - cargo publish --dry-run --allow-dirty -p rpi-simplify
+      - cargo publish --dry-run --allow-dirty -p rpi-memory
 
   publish:
     desc: Publish all packages to crates.io
@@ -92,6 +94,8 @@ tasks:
       - cargo publish --allow-dirty -p rpi-server
       - cargo publish --allow-dirty -p rpi-voice
       - cargo publish --allow-dirty -p rpi-run-stats
+      - cargo publish --allow-dirty -p rpi-simplify
+      - cargo publish --allow-dirty -p rpi-memory
 
   publish-new:
     desc: Publish the packages added after the initial release
@@ -103,6 +107,8 @@ tasks:
       - cargo publish --allow-dirty -p rpi-websearch
       - cargo publish --allow-dirty -p rpi-webfetch
       - cargo publish --allow-dirty -p rpi-im-message
+      - cargo publish --allow-dirty -p rpi-simplify
+      - cargo publish --allow-dirty -p rpi-memory
 
   publish-todo:
     desc: Publish the rpi-todo store compatibility fix

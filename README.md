@@ -22,7 +22,9 @@ objective per project), `rpi-plan-mode` (`/plan`, `plan_mode_start`,
 `plan_mode_complete`),
 `rpi-codegraph` (`codegraph`),
 `rpi-ask-user`, `rpi-permissions`,
-`rpi-websearch`, `rpi-webfetch`, plus `rpi-im-message` (`im_message_server`), plus
+`rpi-websearch`, `rpi-webfetch`, `rpi-simplify` (`simplify`, bounded local
+complexity/duplication review), `rpi-memory` (`memory`, project-local persistent
+recall) and `rpi-im-message` (`im_message_server`), plus
 `rpi-voice`, which adds `/voice` dictation and spoken replies to the running
 TUI. Its STT is OpenAI-compatible by default; built with `--features local-stt`
 it embeds sherpa-onnx + SenseVoice and runs entirely offline (see

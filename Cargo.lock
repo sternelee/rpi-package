@@ -1978,6 +1978,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpi-memory"
+version = "0.1.3"
+dependencies = [
+ "rpi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "rpi-package-install"
 version = "0.0.0"
 dependencies = [
@@ -2006,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "rpi-plugin-sdk"
-version = "0.3.17"
+version = "0.3.19"
 dependencies = [
  "serde_json",
 ]
@@ -2028,6 +2036,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rpi-simplify"
+version = "0.1.3"
+dependencies = [
+ "rpi-plugin-sdk",
+ "serde_json",
 ]
 
 [[package]]
