@@ -10,6 +10,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+mod store;
+
 const GOAL_FILE: &str = ".rpi/goals.json";
 /// The custom-message type stored in the generic AgentMessage payload.
 const GOAL_CUSTOM_TYPE: &str = "goal";
@@ -151,11 +153,8 @@ fn write_goals(goals: &Goals) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create goal directory: {e}"))?;
     }
-    let tmp = path.with_file_name(format!("goals.json.tmp-{}", std::process::id()));
     let data = serde_json::to_string_pretty(goals).map_err(|e| format!("serialize goals: {e}"))?;
-    fs::write(&tmp, data).map_err(|e| format!("write goals: {e}"))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("commit goals: {e}"))?;
-    Ok(())
+    store::write_atomically(&path, &data, "goals")
 }
 
 fn now_ms() -> i64 {

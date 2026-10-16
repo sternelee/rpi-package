@@ -8,6 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod store;
+
 struct Drive {
     params: Value,
     cancelled: AtomicBool,
@@ -98,29 +100,7 @@ fn save(path: &PathBuf, rules: &Rules) -> Result<(), String> {
         &json!({"permissions": {"allow": rules.allow, "deny": rules.deny}}),
     )
     .map_err(|e| e.to_string())?;
-    write_store_atomically(path, &text)
-}
-
-/// Write `text` to `path` via a temp sibling + rename.
-///
-/// `fs::write` truncates and then writes in place, so a shorter document written
-/// over a longer one leaves the previous tail behind, and two rpi sessions
-/// sharing a project can interleave their writes. Either way the rule file
-/// becomes unparsable. `rename` replaces atomically on Unix and on Windows
-/// (`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`), so a reader only ever sees a
-/// whole document.
-fn write_store_atomically(path: &PathBuf, text: &str) -> Result<(), String> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "permissions.json".to_string());
-    let tmp = path.with_file_name(format!("{name}.tmp-{}", std::process::id()));
-    fs::write(&tmp, text).map_err(|e| format!("write permissions: {e}"))?;
-    if let Err(error) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("commit permissions: {error}"));
-    }
-    Ok(())
+    store::write_atomically(path, &text, "permissions")
 }
 
 fn split_rule(rule: &str) -> (&str, &str) {
