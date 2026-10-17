@@ -26,10 +26,21 @@ pub struct HttpTransport {
     session: Option<String>,
     pub(crate) version: Option<String>,
     timeout: u64,
+    /// Configured MCP server name whose stored OAuth credential is attached to
+    /// requests. `None` when the server sets its own `Authorization` header or
+    /// is not config-backed (a raw `url` request).
+    account: Option<String>,
 }
 
 impl HttpTransport {
     pub fn new(server: &HttpServer) -> Result<Self, String> {
+        Self::with_account(server, None)
+    }
+
+    /// Build a transport that attaches the stored OAuth bearer token for
+    /// `account`. An `Authorization` header in the server config always wins,
+    /// so a hand-configured token is never silently overridden.
+    pub fn with_account(server: &HttpServer, account: Option<&str>) -> Result<Self, String> {
         let url = validate_mcp_url(&server.url)?;
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in &server.headers {
@@ -39,6 +50,10 @@ impl HttpTransport {
                     .map_err(|e| e.to_string())?,
             );
         }
+        let configured_auth = server
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"));
         let client = Client::builder()
             .pool_max_idle_per_host(0)
             .tcp_nodelay(true)
@@ -57,17 +72,32 @@ impl HttpTransport {
             session: None,
             version: None,
             timeout: server.timeout.clamp(1, 300),
+            account: if configured_auth {
+                None
+            } else {
+                account.map(str::to_string)
+            },
         })
     }
     pub fn set_timeout(&mut self, seconds: u64) {
         self.timeout = seconds.clamp(1, 300);
     }
-    fn post(&self, value: &Value) -> reqwest::RequestBuilder {
+    /// Resolve the request credential. Called from synchronous code (never from
+    /// inside the async exchange) because a refresh performs blocking I/O.
+    fn credential(&self) -> Option<String> {
+        self.account
+            .as_deref()
+            .and_then(crate::oauth::bearer)
+    }
+    fn post(&self, value: &Value, credential: Option<&str>) -> reqwest::RequestBuilder {
         let mut request = self
             .client
             .post(self.url.clone())
             .header("Accept", "application/json, text/event-stream")
             .json(value);
+        if let Some(token) = credential {
+            request = request.bearer_auth(token);
+        }
         if let Some(session) = &self.session {
             request = request.header("Mcp-Session-Id", session);
         }
@@ -100,7 +130,9 @@ impl HttpTransport {
         let deadline = Deadline::new(self.timeout, &method, control);
         let id = value.get("id").cloned();
         let is_initialize = method == "initialize";
-        let result = self.run(&deadline, self.exchange(&value));
+        // Resolve credentials outside the async exchange: a refresh is blocking.
+        let credential = self.credential();
+        let result = self.run(&deadline, self.exchange(&value, credential.as_deref()));
         let (response, session) = match result {
             Ok(result) => result,
             Err(error) => {
@@ -109,7 +141,7 @@ impl HttpTransport {
                         let cancel = json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":id,"reason":error}});
                         self.runtime.block_on(async {
                             let _ = self
-                                .post(&cancel)
+                                .post(&cancel, credential.as_deref())
                                 .timeout(Duration::from_millis(200))
                                 .send()
                                 .await;
@@ -124,12 +156,16 @@ impl HttpTransport {
         }
         Ok(response)
     }
-    async fn exchange(&self, value: &Value) -> Result<(Value, Option<String>), String> {
+    async fn exchange(
+        &self,
+        value: &Value,
+        credential: Option<&str>,
+    ) -> Result<(Value, Option<String>), String> {
         if serde_json::to_vec(value).map_err(|e| e.to_string())?.len() > MAX_MESSAGE {
             return Err("MCP request exceeded the 16 MiB limit".into());
         }
         let mut response = self
-            .post(value)
+            .post(value, credential)
             .send()
             .await
             .map_err(|e| format!("MCP HTTP request failed: {e}"))?;
@@ -138,6 +174,14 @@ impl HttpTransport {
                 "MCP HTTP session expired (404); connection will be reinitialized on the next call"
                     .into(),
             );
+        }
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(match self.account.as_deref() {
+                Some(name) => format!(
+                    "MCP HTTP server \"{name}\" rejected the request as unauthorized (401); run `/mcp-oauth login {name}`"
+                ),
+                None => "MCP HTTP server rejected the request as unauthorized (401); configure an Authorization header for this server".into(),
+            });
         }
         if !response.status().is_success() {
             return Err(format!("MCP HTTP server returned {}", response.status()));
@@ -206,7 +250,7 @@ impl HttpTransport {
                 validate_message(&message)?;
                 if message.get("method").is_some() {
                     if let Some(reply) = client_reply(&message) {
-                        let mut reply_request = self.post(&reply);
+                        let mut reply_request = self.post(&reply, credential);
                         // A server may ping during initialization after assigning
                         // the session header but before InitializeResult arrives.
                         if self.session.is_none() {

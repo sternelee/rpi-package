@@ -165,6 +165,9 @@ fn managed_fixture(sse: bool) -> Server {
     })
 }
 fn managed_flow(sse: bool) {
+    // `mcp_call` latches the process-global session scope; serialize with the
+    // queue tests that assert on it.
+    let _serial = crate::runtime::scope_test_guard();
     let server = managed_fixture(sse);
     let params = json!({"url":server.url,"tool":"image","arguments":{}});
     let first = mcp_call(&params, &Control::default()).unwrap();
@@ -263,6 +266,7 @@ fn mismatched_json_response_id_is_rejected() {
 }
 #[test]
 fn expired_session_is_reinitialized_without_replaying_tool() {
+    let _serial = crate::runtime::scope_test_guard();
     let initializes = Mutex::new(0);
     let calls = Mutex::new(0);
     let server = Server::start(move |head, _, request| {
@@ -322,4 +326,53 @@ fn expired_session_is_reinitialized_without_replaying_tool() {
             .count(),
         2
     );
+}
+
+#[test]
+fn command_surface_uses_an_http_config_entry() {
+    // `tools` latches the process-global session scope, like the other
+    // connection tests.
+    let _serial = crate::runtime::scope_test_guard();
+    let server = managed_fixture(false);
+    let dir = std::env::temp_dir().join(format!("rpi-mcp-cmd-http-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mcp.json");
+    std::fs::write(
+        &path,
+        json!({"mcpServers": {"remote": {"url": server.url}}}).to_string(),
+    )
+    .unwrap();
+
+    // status reads a `{"url": ...}` entry as an http transport without connecting.
+    let status = crate::command_response(&format!("--config {} status", path.display()));
+    let text = status["text"].as_str().unwrap();
+    assert!(text.contains("remote"), "{text}");
+    assert!(text.contains("http"), "{text}");
+    assert!(text.contains("idle"), "{text}");
+
+    // tools connects over Streamable HTTP and lists the fixture's tools.
+    let tools = crate::command_response(&format!("--config {} tools remote", path.display()));
+    let text = tools["text"].as_str().unwrap();
+    assert!(text.contains("image"), "{text}");
+
+    // The HTTP connection is visible to status through the same key.
+    let status = crate::command_response(&format!("--config {} status", path.display()));
+    assert!(
+        status["text"].as_str().unwrap().contains("connected"),
+        "{status}"
+    );
+
+    let closed = crate::command_response(&format!("--config {} close remote", path.display()));
+    assert!(
+        closed["text"].as_str().unwrap().contains("Closed"),
+        "{closed}"
+    );
+    // Closing drops the connection, so status returns to idle.
+    let status = crate::command_response(&format!("--config {} status", path.display()));
+    assert!(
+        status["text"].as_str().unwrap().contains("idle"),
+        "{status}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -3,14 +3,23 @@
 use rpi_mcp_adapter::{call_from_config, discover_from_config};
 use serde_json::json;
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A unique config path per call. The system clock alone is not enough: parallel
+/// tests in one process can read the same coarse timestamp, and then one test's
+/// cleanup (`remove_file`) deletes another test's config.
 fn config_path() -> std::path::PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("rpi-mcp-test-{}-{suffix}.json", std::process::id()))
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "rpi-mcp-test-{}-{suffix}-{sequence}.json",
+        std::process::id()
+    ))
 }
 
 fn write_config(path: &std::path::Path) {
@@ -750,4 +759,205 @@ fn timeout_kills_descendants_holding_inherited_pipes() {
         !rpi_plugin_sdk::process::process_is_running(pid).unwrap(),
         "MCP descendant survived transport shutdown"
     );
+}
+
+#[test]
+fn command_status_reports_configured_servers() {
+    let path = config_path();
+    write_config(&path);
+    let response =
+        rpi_mcp_adapter::command_response(&format!("--config {} status", path.display()));
+    assert_eq!(response["kind"], "message");
+    let text = response["text"].as_str().unwrap();
+    assert!(text.contains("fake"), "{text}");
+    assert!(text.contains("stdio"), "{text}");
+    assert!(text.contains("idle"), "{text}");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_tools_connects_and_lists_discovered_tools() {
+    let path = config_path();
+    write_config(&path);
+    // No explicit server -> a selector is returned; selecting its item re-invokes
+    // the handler with the encoded subcommand and no `--config`, so the picker
+    // must carry the resolved path into the continuation.
+    let picker = rpi_mcp_adapter::command_response(&format!("--config {} tools", path.display()));
+    assert_eq!(picker["kind"], "selector");
+    let selected = picker["items"][0]["value"].as_str().unwrap().to_string();
+    assert_eq!(selected, "tools fake");
+    let continuation = json!({"action": "select", "value": selected}).to_string();
+    let response = rpi_mcp_adapter::command_response(&continuation);
+    assert_eq!(response["kind"], "message", "{response}");
+    let text = response["text"].as_str().unwrap();
+    assert!(text.contains("echo"), "{text}");
+    assert!(text.contains("value"), "{text}");
+
+    // The connection opened by `tools` is visible to `status` through the same
+    // `(scope, identity, name)` key.
+    let status = rpi_mcp_adapter::command_response(&format!("--config {} status", path.display()));
+    assert!(
+        status["text"].as_str().unwrap().contains("connected"),
+        "{status}"
+    );
+
+    rpi_mcp_adapter::close_from_config(path.to_str().unwrap(), "fake").unwrap();
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_add_and_remove_edit_the_config() {
+    let path = config_path();
+    fs::write(&path, r#"{"mcpServers":{}}"#).unwrap();
+    let added = rpi_mcp_adapter::command_response(&format!(
+        "--config {} add docs node server.js",
+        path.display()
+    ));
+    assert!(added["text"].as_str().unwrap().contains("Added"), "{added}");
+    let configured = fs::read_to_string(&path).unwrap();
+    assert!(configured.contains("\"docs\""));
+    assert!(configured.contains("server.js"));
+
+    let removed =
+        rpi_mcp_adapter::command_response(&format!("--config {} remove docs", path.display()));
+    assert!(
+        removed["text"].as_str().unwrap().contains("Removed"),
+        "{removed}"
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_resources_lists_server_resources() {
+    let path = config_path();
+    write_config(&path);
+    let response =
+        rpi_mcp_adapter::command_response(&format!("--config {} resources fake", path.display()));
+    let text = response["text"].as_str().unwrap();
+    assert!(text.contains("mem://alpha"), "{text}");
+    rpi_mcp_adapter::close_from_config(path.to_str().unwrap(), "fake").unwrap();
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_prompts_lists_and_loads_a_template() {
+    let path = config_path();
+    write_config(&path);
+    let listed =
+        rpi_mcp_adapter::command_response(&format!("--config {} prompts fake", path.display()));
+    let text = listed["text"].as_str().unwrap();
+    assert!(text.contains("greet"), "{text}");
+
+    // `prompt` fetches prompts/get and reaches for the host editor. In this
+    // test there is no host runtime, so it falls back to showing the text.
+    let loaded = rpi_mcp_adapter::command_response(&format!(
+        "--config {} prompt fake greet who=Ada",
+        path.display()
+    ));
+    let text = loaded["text"].as_str().unwrap();
+    assert!(text.contains("Hello Ada"), "{text}");
+    rpi_mcp_adapter::close_from_config(path.to_str().unwrap(), "fake").unwrap();
+    fs::remove_file(path).unwrap();
+}
+
+/// A config with one remote (`url`) server and one stdio server, so tests can
+/// assert that OAuth only ever offers the remote one.
+fn write_oauth_config(path: &std::path::Path) {
+    let command = env!("CARGO_BIN_EXE_fake_mcp_server");
+    let config = json!({
+        "mcpServers": {
+            "fake": { "command": command, "enabled": true },
+            "remote": {
+                "url": "https://mcp.example.com/mcp",
+                "enabled": true,
+                "timeout": 5
+            }
+        }
+    });
+    fs::write(path, config.to_string()).unwrap();
+}
+
+#[test]
+fn command_oauth_status_lists_remote_servers_only() {
+    let path = config_path();
+    write_oauth_config(&path);
+    let response =
+        rpi_mcp_adapter::oauth_command_response(&format!("--config {} status", path.display()));
+    assert_eq!(response["kind"], "message", "{response}");
+    let text = response["text"].as_str().unwrap();
+    assert!(text.contains("MCP OAuth state"), "{text}");
+    assert!(text.contains("remote"), "{text}");
+    assert!(text.contains("https://mcp.example.com/mcp"), "{text}");
+    // A stdio server can never hold an OAuth credential.
+    assert!(!text.contains("fake"), "{text}");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_oauth_help_documents_every_subcommand() {
+    let path = config_path();
+    write_oauth_config(&path);
+    let response =
+        rpi_mcp_adapter::oauth_command_response(&format!("--config {} help", path.display()));
+    assert_eq!(response["kind"], "message", "{response}");
+    let text = response["text"].as_str().unwrap();
+    for sub in ["/mcp-oauth login", "/mcp-oauth logout", "/mcp-oauth cancel"] {
+        assert!(text.contains(sub), "missing {sub} in {text}");
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_oauth_picker_routes_its_selection_back_to_oauth() {
+    let path = config_path();
+    write_oauth_config(&path);
+    // No server given -> a selector over the remote servers only. `cancel` is
+    // used because it is the one subcommand that touches nothing outside the
+    // process: login would start a real network flow.
+    let picker =
+        rpi_mcp_adapter::oauth_command_response(&format!("--config {} cancel", path.display()));
+    assert_eq!(picker["kind"], "selector", "{picker}");
+    let items = picker["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{picker}");
+    let selected = items[0]["value"].as_str().unwrap().to_string();
+    // The value carries the originating command so the continuation can route
+    // itself without the `/mcp` dispatcher guessing.
+    assert_eq!(selected, "/mcp-oauth cancel remote");
+
+    // Carry the config explicitly too, so this assertion does not depend on the
+    // process-global picker state (other tests use the same slot).
+    let continuation = json!({
+        "action": "select",
+        "value": format!("--config {} {selected}", path.display()),
+    })
+    .to_string();
+    let response = rpi_mcp_adapter::command_response(&continuation);
+    assert_eq!(response["kind"], "message", "{response}");
+    assert!(
+        response["text"]
+            .as_str()
+            .unwrap()
+            .contains("No sign-in to remote is in progress."),
+        "{response}"
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn command_oauth_login_rejects_a_server_without_a_url() {
+    let path = config_path();
+    write_oauth_config(&path);
+    // `fake` is a stdio server, so there is nothing to authorize against and the
+    // failure is reported before any network work starts.
+    let response =
+        rpi_mcp_adapter::oauth_command_response(&format!("--config {} login fake", path.display()));
+    assert_eq!(response["kind"], "message", "{response}");
+    assert!(
+        response["text"]
+            .as_str()
+            .unwrap()
+            .contains("not a remote server"),
+        "{response}"
+    );
+    fs::remove_file(path).unwrap();
 }

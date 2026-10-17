@@ -83,7 +83,7 @@ impl McpConfig {
     }
 }
 
-fn validate_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty()
         || !name
             .chars()

@@ -1,11 +1,19 @@
 #![forbid(unsafe_code)]
+// The SDK's `export_plugin!` macro expands to the `pub extern "C" fn
+// rpi_plugin_register(*const PluginApi)` entrypoint and validates/dereferences
+// the pointer via `register_entrypoint`; clippy attributes that generated deref
+// here. The ABI signature is fixed, so the lint is not actionable. (Pre-existing:
+// most crates in this workspace need the same allow.)
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod commands;
 mod config;
 mod connection;
 mod control;
 mod http;
 mod jsonrpc;
 mod kit;
+mod oauth;
 mod process;
 mod runtime;
 mod transport;
@@ -25,6 +33,20 @@ pub use runtime::{
     ResourceUpdate,
 };
 use serde_json::{json, Value};
+
+/// Run the `/mcp` command surface without a TUI (embedders and tests). `args`
+/// is the argument string after `/mcp`; the returned value is the UI response
+/// object (`{"kind":"message",...}`, `"selector"`, or `"editor"`).
+pub fn command_response(args: &str) -> Value {
+    commands::run(args)
+}
+
+/// Run the `/mcp-oauth` command surface without a TUI (embedders and tests).
+/// `args` is the argument string after `/mcp-oauth`; the returned value has the
+/// same shape as [`command_response`].
+pub fn oauth_command_response(args: &str) -> Value {
+    commands::run_oauth(args)
+}
 pub use transport::{http_request, StdioTransport};
 
 fn mcp_call(params: &Value, control: &Control) -> Result<Value, String> {
@@ -66,8 +88,19 @@ fn mcp_request(params: &Value, control: &Control) -> Result<Value, String> {
 
 static RUNTIME: std::sync::OnceLock<rpi_plugin_sdk::PluginApi> = std::sync::OnceLock::new();
 
+/// Description shown by the host's command autocomplete for `/mcp`.
+const COMMAND_DESCRIPTION: &str =
+    "Inspect and manage MCP servers: status, tools, resources, prompts, add, edit";
+
+/// Description shown by the host's command autocomplete for `/mcp-oauth`.
+const OAUTH_COMMAND_DESCRIPTION: &str =
+    "Sign in to remote MCP servers: status, login, logout, cancel";
+
 /// Dispatch a host runtime action (used to append the resource-update message).
-fn call_runtime(id: rpi_plugin_sdk::RuntimeActionId, args: Value) -> Result<Value, String> {
+pub(crate) fn call_runtime(
+    id: rpi_plugin_sdk::RuntimeActionId,
+    args: Value,
+) -> Result<Value, String> {
     let runtime = *RUNTIME.get().ok_or("mcp runtime unavailable")?;
     let mut out = rpi_plugin_sdk::StbString::empty();
     // Bind the JSON to a local: `StbStringRef` borrows it for the call, so an
@@ -187,6 +220,51 @@ rpi_plugin_sdk::export_plugin!(|api| {
     }
     // Remember the host API so the TurnEnd handler can append resource updates.
     let _ = RUNTIME.set(*api);
+    // The `/mcp` (and `/mcp-adapter`) management command. Registered before the
+    // event handlers so a host that lacks command support still gets resource
+    // updates; the command is best-effort when the slot is absent.
+    if let Some(register) = api.register_command {
+        for name in ["mcp", "mcp-adapter"] {
+            let rc = register(
+                rpi_plugin_sdk::StbStringRef::from_str(name),
+                rpi_plugin_sdk::StbStringRef::from_str(COMMAND_DESCRIPTION),
+                commands::mcp_command,
+            );
+            if rc != 0 {
+                return rc;
+            }
+        }
+        // `/mcp-oauth` owns the browser sign-in flow; it is separate from `/mcp`
+        // so its handler can be invoked by `rpi auth`-style automation too.
+        let rc = register(
+            rpi_plugin_sdk::StbStringRef::from_str("mcp-oauth"),
+            rpi_plugin_sdk::StbStringRef::from_str(OAUTH_COMMAND_DESCRIPTION),
+            commands::oauth_command,
+        );
+        if rc != 0 {
+            return rc;
+        }
+    }
+    // Offer one OAuth provider per configured remote server, so the host's
+    // `rpi auth` surface and the plugin's own flows share a single credential
+    // store. Registration happens once at load: a newly added remote server
+    // becomes signable after the next `/reload`.
+    if let Some(register) = api.register_oauth_provider {
+        for server in commands::oauth_servers() {
+            let manifest = oauth::manifest(&server);
+            let rc = register(
+                rpi_plugin_sdk::StbStringRef::from_str(&manifest),
+                oauth::provider_request,
+                kit::plugin_free_string,
+                std::ptr::null_mut(),
+            );
+            // An older host that cannot take another provider must not fail the
+            // whole plugin: the `/mcp-oauth` command still works on its own.
+            if rc != 0 {
+                break;
+            }
+        }
+    }
     if let Some(register) = api.register_event_handler {
         // SessionShutdown is a marker without session identity: release all
         // connections in this extension instance.

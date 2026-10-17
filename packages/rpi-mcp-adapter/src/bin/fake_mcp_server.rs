@@ -75,7 +75,7 @@ fn main() {
         }
         let result = match method {
             "initialize" => {
-                json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"rpi-fake-mcp","version":"1"}})
+                json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{},"resources":{},"prompts":{}},"serverInfo":{"name":"rpi-fake-mcp","version":"1"}})
             }
             "resources/list" => {
                 if let Some(pages) = modes.iter().find_map(|arg| {
@@ -170,6 +170,15 @@ fn main() {
                 } else {
                     json!({"tools":[echo]})
                 }
+            }
+            "prompts/list" => {
+                json!({"prompts":[{"name":"greet","description":"Greet someone","arguments":[{"name":"who","required":true}]}]})
+            }
+            "prompts/get" => {
+                let who = request["params"]["arguments"]["who"]
+                    .as_str()
+                    .unwrap_or("world");
+                json!({"description":"Greeting","messages":[{"role":"user","content":{"type":"text","text":format!("Hello {who}")}}]})
             }
             "tools/call" => {
                 if mode("--stateful-resources") {

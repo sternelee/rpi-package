@@ -21,3 +21,8 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net"] }
 url = { workspace = true }
+# MCP OAuth: PKCE needs SHA-256 + base64url, and the verifier/state need
+# cryptographic randomness. All three are already in the workspace lock file.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"

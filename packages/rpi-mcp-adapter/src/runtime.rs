@@ -57,6 +57,7 @@ struct Session {
 impl Session {
     fn start(
         config: &McpServerConfig,
+        account: &str,
         timeout: u64,
         control: &Control,
         notifications: &SyncSender<Value>,
@@ -70,7 +71,9 @@ impl Session {
                 s.cwd.as_deref(),
                 Some(notifications.clone()),
             )?),
-            McpServerConfig::Http(s) => Transport::Http(HttpTransport::new(s)?),
+            McpServerConfig::Http(s) => {
+                Transport::Http(HttpTransport::with_account(s, Some(account))?)
+            }
         };
         transport.timeout(timeout);
         let info = parse_initialize(transport.request(
@@ -589,6 +592,7 @@ pub(crate) fn resources(params: &Value, control: &Control) -> Result<Value, Stri
     if action == "list" {
         return with_session(
             key,
+            &name,
             config,
             timeout,
             control,
@@ -635,6 +639,7 @@ pub(crate) fn resources(params: &Value, control: &Control) -> Result<Value, Stri
         let mut retired = false;
         let _ = with_session(
             key.clone(),
+            &name,
             config,
             timeout,
             control,
@@ -675,6 +680,7 @@ pub(crate) fn resources(params: &Value, control: &Control) -> Result<Value, Stri
         }
         with_session(
             key.clone(),
+            &name,
             config,
             timeout,
             control,
@@ -706,6 +712,7 @@ pub(crate) fn resources(params: &Value, control: &Control) -> Result<Value, Stri
     // model through the tool result.
     with_session(
         key,
+        &name,
         config,
         timeout,
         control,
@@ -736,6 +743,7 @@ fn lock_until<'a, T>(
 }
 fn with_session<T>(
     key: String,
+    name: &str,
     config: McpServerConfig,
     timeout: u64,
     control: &Control,
@@ -779,7 +787,7 @@ fn with_session<T>(
     }
     let new_connection = state.session.is_none();
     if new_connection {
-        let mut session = Session::start(&config, timeout, &control, &entry.notifications)?;
+        let mut session = Session::start(&config, name, timeout, &control, &entry.notifications)?;
         if let Err(error) = restore_subscriptions(&key, &mut session, &control, skip_restore_uri) {
             if session.failed || control.check().is_err() {
                 return Err(format!("MCP resource subscription restoration interrupted: {error}; the next call will retry"));
@@ -828,7 +836,7 @@ pub fn shutdown_connections() {
         let _ = release_entry(&key, &entry);
     }
 }
-fn close_key(key: &str) -> Result<(), String> {
+pub(crate) fn close_key(key: &str) -> Result<(), String> {
     let entry = {
         let map = sessions()
             .lock()
@@ -877,7 +885,7 @@ fn release_entry(key: &str, entry: &Arc<Entry>) -> Result<(), String> {
     Ok(())
 }
 
-fn host_scope(params: &Value) -> String {
+pub(crate) fn host_scope(params: &Value) -> String {
     let host = params.get(rpi_plugin_sdk::HOST_CONTEXT_KEY);
     if let Some(id) = host
         .and_then(|v| v.get("sessionId"))
@@ -904,7 +912,7 @@ fn host_cwd(params: &Value) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
-fn config_file(params: &Value) -> Result<PathBuf, String> {
+pub(crate) fn config_file(params: &Value) -> Result<PathBuf, String> {
     let path = params
         .get("configPath")
         .and_then(Value::as_str)
@@ -912,12 +920,19 @@ fn config_file(params: &Value) -> Result<PathBuf, String> {
     std::fs::canonicalize(host_cwd(params).join(path))
         .map_err(|e| format!("read MCP config {path:?}: {e}"))
 }
-fn load_config(params: &Value) -> Result<(PathBuf, McpConfig), String> {
+pub(crate) fn load_config(params: &Value) -> Result<(PathBuf, McpConfig), String> {
     let path = config_file(params)?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read MCP config: {e}"))?;
     Ok((path, McpConfig::parse(&text)?))
 }
-fn target(params: &Value) -> Result<(String, String, McpServerConfig, u64), String> {
+/// The registry key for one `(scope, config identity, server name)` triple.
+/// Extracted so the command surface can map a configured server back to its
+/// live connection without duplicating the identity derivation in [`target`].
+pub(crate) fn connection_key(scope: &str, identity: &str, name: &str) -> String {
+    serde_json::to_string(&(scope, identity, name)).unwrap_or_default()
+}
+
+pub(crate) fn target(params: &Value) -> Result<(String, String, McpServerConfig, u64), String> {
     let scope = host_scope(params);
     // Latch the session this call belongs to: `TurnEnd` carries no payload, so
     // this is how the injection path learns which session it is serving.
@@ -949,7 +964,7 @@ fn target(params: &Value) -> Result<(String, String, McpServerConfig, u64), Stri
         });
         ("http".into(), url, config)
     };
-    let key = serde_json::to_string(&(scope, identity, &name)).map_err(|e| e.to_string())?;
+    let key = connection_key(&scope, &identity, &name);
     let (enabled, default_timeout) = match &config {
         McpServerConfig::Stdio(s) => (s.enabled, s.timeout),
         McpServerConfig::Http(s) => (s.enabled, s.timeout),
@@ -997,9 +1012,10 @@ pub(crate) fn call(params: &Value, control: &Control) -> Result<Value, String> {
     if !arguments.is_object() {
         return Err("MCP arguments must be an object".into());
     }
-    let (key, _, config, timeout) = target(params)?;
+    let (key, name, config, timeout) = target(params)?;
     with_session(
         key,
+        &name,
         config,
         timeout,
         control,
@@ -1052,6 +1068,7 @@ pub(crate) fn list(params: &Value, control: &Control) -> Result<Value, String> {
     }
     with_session(
         key,
+        &name,
         config,
         timeout,
         control,
@@ -1141,6 +1158,146 @@ pub fn take_resource_updates(scope: Option<&str>) -> Vec<ResourceUpdate> {
     take_pending_updates(scope)
 }
 
+/// Report whether a configured server currently has a live connection. Used by
+/// the `/mcp` status surface; never opens a connection and never blocks on one.
+pub(crate) fn is_connected(scope: &str, identity: &str, name: &str) -> bool {
+    sessions()
+        .lock()
+        .map(|map| map.contains_key(&connection_key(scope, identity, name)))
+        .unwrap_or(false)
+}
+
+/// Snapshot every configured server's transport, enabled flag and live
+/// connection state. Reads the config file directly so disabled servers are
+/// still reported; the model-facing `mcp_list` tool only lists configured
+/// names, so this stays a command-surface concern.
+pub(crate) fn status(params: &Value) -> Result<Value, String> {
+    let scope = host_scope(params);
+    remember_scope(&scope);
+    let (path, config) = load_config(params)?;
+    let identity = path.to_string_lossy().into_owned();
+    let servers: Vec<Value> = config
+        .servers
+        .iter()
+        .map(|(name, server)| {
+            let (transport, enabled) = match server {
+                McpServerConfig::Stdio(stdio) => ("stdio", stdio.enabled),
+                McpServerConfig::Http(http) => ("http", http.enabled),
+            };
+            json!({
+                "server": name,
+                "transport": transport,
+                "enabled": enabled,
+                "connected": enabled && is_connected(&scope, &identity, name),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "config": path.to_string_lossy(),
+        "servers": servers,
+    }))
+}
+
+/// Release a server's connection so the next call reconnects from scratch.
+/// Unlike the `mcp_list action=close` tool this never starts a connection and
+/// tolerates a server that is not currently connected.
+pub(crate) fn reconnect(params: &Value, control: &Control) -> Result<Value, String> {
+    control.check()?;
+    let (key, name, _config, _timeout) = target(params)?;
+    close_key(&key)?;
+    Ok(json!({"server": name, "reconnected": true}))
+}
+
+/// List a server's prompts (`prompts/list`), paginated like tools/resources.
+pub(crate) fn prompts(params: &Value, control: &Control) -> Result<Value, String> {
+    control.check()?;
+    let (key, name, config, timeout) = target(params)?;
+    with_session(
+        key,
+        &name,
+        config,
+        timeout,
+        control,
+        None,
+        |session, control, _| {
+            let mut prompts = Vec::new();
+            let mut cursor = None;
+            let mut seen = HashSet::new();
+            for _ in 0..100 {
+                let params = cursor
+                    .as_ref()
+                    .map(|c| json!({"cursor": c}))
+                    .unwrap_or_else(|| json!({}));
+                let result = response_result(session.request("prompts/list", params, control)?)?;
+                if let Some(items) = result.get("prompts").and_then(Value::as_array) {
+                    prompts.extend(items.iter().cloned());
+                }
+                if prompts.len() > 16_384 {
+                    return Err("MCP prompt list exceeded 16384 prompts".into());
+                }
+                match result.get("nextCursor") {
+                    None => return Ok(json!({"server": name, "prompts": prompts})),
+                    Some(Value::String(next)) => {
+                        if !seen.insert(next.clone()) {
+                            return Err(
+                                "MCP prompts/list returned a repeated pagination cursor".into()
+                            );
+                        }
+                        cursor = Some(next.clone());
+                    }
+                    _ => return Err("MCP prompts/list nextCursor must be a string".into()),
+                }
+            }
+            Err("MCP prompts/list exceeded 100 pages".into())
+        },
+    )
+}
+
+/// Fetch one prompt (`prompts/get`) as a list of messages. The command surface
+/// renders the messages and puts them in the editor, mirroring how MCP prompt
+/// templates behave as slash commands in other hosts.
+pub(crate) fn prompt_get(params: &Value, control: &Control) -> Result<Value, String> {
+    control.check()?;
+    let name = crate::kit::string_param(params, "prompt")?;
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !arguments.is_object() {
+        return Err("MCP prompt arguments must be an object".into());
+    }
+    let (key, server, config, timeout) = target(params)?;
+    with_session(
+        key,
+        &server,
+        config,
+        timeout,
+        control,
+        None,
+        |session, control, _| {
+            let result = response_result(session.request(
+                "prompts/get",
+                json!({"name": name, "arguments": arguments}),
+                control,
+            )?)?;
+            Ok(json!({"server": server, "prompt": name, "result": result}))
+        },
+    )
+}
+
+/// Serializes tests that read or write the process-global session scope
+/// ([`CURRENT_SCOPE`]) or the `RPI_SESSION_ID` environment variable.
+///
+/// Connection tests drive [`target`], which latches the scope from the host
+/// context; the queue tests assert on that latch. The parallel test harness
+/// runs both, so they must share one lock or the latch races (a connection
+/// test's `library` fallback can overwrite a queue test's `session:a`).
+#[cfg(test)]
+pub(crate) fn scope_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,11 +1329,10 @@ mod tests {
         }
     }
 
-    /// The queue is process-global, so these tests must not interleave.
-    static QUEUE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
+    /// The queue and session scope are process-global, so these tests must not
+    /// interleave with each other or with connection tests that latch the scope.
     fn queue_test_guard() -> MutexGuard<'static, ()> {
-        QUEUE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        scope_test_guard()
     }
 
     fn queue(scope: &str, key: &str, uri: &str, text: &str) {

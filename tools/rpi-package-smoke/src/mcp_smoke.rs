@@ -1,7 +1,9 @@
 use rpi_agent::{AgentTool, TextContentOrImage};
 use rpi_extensions::{
-    load_session_mixed, ExtensionSession, NullDiagnostics, PluginToolAdapter, ToolCallContext,
+    host_free_string, load_session_mixed, ExtensionSession, NullDiagnostics, PluginToolAdapter,
+    ToolCallContext,
 };
+use rpi_plugin_sdk::{StbString, StbStringRef};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +49,72 @@ async fn mcp_dll_persistent_scoped_calls_images_and_cancellation() {
         json!({"mcpServers":{"fake":{"command":fake,"args":["--paged"],"timeout":2}}}).to_string(),
     )
     .unwrap();
+    // The plugin registers `/mcp`, `/mcp-adapter` and `/mcp-oauth`; invoke the
+    // commands through the real host ABI the TUI uses (envelope in, UI response
+    // JSON out).
+    let command_names: Vec<&str> = snapshot
+        .commands()
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert!(command_names.contains(&"mcp"), "{command_names:?}");
+    assert!(command_names.contains(&"mcp-adapter"), "{command_names:?}");
+    assert!(command_names.contains(&"mcp-oauth"), "{command_names:?}");
+    let mcp = snapshot
+        .commands()
+        .iter()
+        .find(|command| command.name == "mcp")
+        .unwrap();
+    let envelope = json!({
+        "command": "/mcp",
+        "args": format!("--config {} status", path.display()),
+    })
+    .to_string();
+    let mut out = StbString::empty();
+    let rc = (mcp.handler)(
+        StbStringRef::from_str(&envelope),
+        &mut out as *mut StbString,
+        mcp.user_data,
+    );
+    assert_eq!(rc, 0, "command handler failed");
+    let response = out.to_string_lossy();
+    host_free_string(out);
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["kind"], "message");
+    assert!(response["text"].as_str().unwrap().contains("fake"));
+
+    // `/mcp-oauth` is registered independently of `/mcp`. This config holds only
+    // a stdio server, so the status path must report that there is nothing to
+    // sign in to rather than opening a flow.
+    let oauth = snapshot
+        .commands()
+        .iter()
+        .find(|command| command.name == "mcp-oauth")
+        .unwrap();
+    let envelope = json!({
+        "command": "/mcp-oauth",
+        "args": format!("--config {} status", path.display()),
+    })
+    .to_string();
+    let mut out = StbString::empty();
+    let rc = (oauth.handler)(
+        StbStringRef::from_str(&envelope),
+        &mut out as *mut StbString,
+        oauth.user_data,
+    );
+    assert_eq!(rc, 0, "oauth command handler failed");
+    let response = out.to_string_lossy();
+    host_free_string(out);
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["kind"], "message");
+    assert!(
+        response["text"]
+            .as_str()
+            .unwrap()
+            .contains("No remote (HTTP) MCP servers"),
+        "{response}"
+    );
+
     let adapter = |name: &str, scope: &str| {
         let tool = snapshot
             .tools()
