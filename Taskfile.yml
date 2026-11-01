@@ -160,6 +160,7 @@ tasks:
       - cargo publish --dry-run --allow-dirty -p rpi-permission-gate
       - cargo publish --dry-run --allow-dirty -p rpi-voice
       - cargo publish --dry-run --allow-dirty -p rpi-run-stats
+      - cargo publish --dry-run --allow-dirty -p rpi-remote
 
   publish:
     desc: Publish all packages to crates.io
@@ -184,6 +185,7 @@ tasks:
       - cargo publish --allow-dirty -p rpi-permission-gate
       - cargo publish --allow-dirty -p rpi-voice
       - cargo publish --allow-dirty -p rpi-run-stats
+      - cargo publish --allow-dirty -p rpi-remote
 
   publish-new:
     desc: Publish the packages added after the initial release

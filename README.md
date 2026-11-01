@@ -104,6 +104,62 @@ can depend on the compatible minor line with `rpi-extcore = "0.1"`; it requires
 Rust 1.78+ and a compatible native `rpi --mode rpc` executable at runtime. See
 [rpi-extcore](packages/rpi-extcore/README.md), [rpi-http](packages/rpi-http/README.md) and the [architecture contract](docs/architecture/extension-core.md). The new packages are ordinary Rust libraries; existing extension installation and startup commands remain the same.
 
+## Local agent mesh (rpi-remote)
+
+`rpi-remote` joins several `rpi` processes on one machine into a local **agent
+mesh**: a per-machine broker over a Unix-domain socket, leader election with
+failover, and the `agent_send` / `list_peers` tools, so two sessions can split
+work between roles (`backend`, `frontend`, `tests`, …) and coordinate.
+`/remote-pi start` joins. This is stage 1 of a port of
+[`remote_pi`](https://github.com/jacobaraujo7/remote_pi); the relay/pairing half
+and the resulting constraints are documented in
+[`packages/rpi-remote/README.md`](packages/rpi-remote/README.md).
+
+`rpi-providers` is one independently loaded package for DeepSeek, OpenRouter,
+llama.cpp and Proxy. It keeps a single native plugin entry and separate
+provider IDs, model catalogs and authentication policies. Install or upgrade
+one package; maintain vendor implementations in separate modules.
+
+```bash
+rpi install rpi-providers --github pi-rust/rpi-package
+```
+
+Starting with 0.1.2, this package is published to crates.io and distributed as
+prebuilt archives through GitHub Releases. It uses `rpi-plugin-sdk` 0.6.3 with the optional
+`provider` feature and matching `rpi-ai` 0.6.3; use the rpi 0.6.3 host for this
+package. See [the package guide](packages/rpi-providers/README.md) for compatibility,
+source linking, migration and tests.
+
+## Web workspace (rpi-web)
+
+`rpi-web` provides project-based conversations in a browser, with streaming replies, tool interactions, Markdown rendering, file previews, and Git diffs. The interface supports English and Simplified Chinese. It supports a native extension entry point and a standalone program, sharing the same Web core.
+
+Download and extract a [Web release](https://github.com/pi-rust/rpi-package/releases?q=rpi-web-v), keep the complete `assets/` directory, and install the [rpi 0.7.0 host](https://github.com/bigfish1913/pi-rust/releases/tag/v0.7.0). Configure model credentials for the service process before starting:
+
+```bash
+# Run from the extracted Web directory with an existing project directory.
+./rpi-web --project /path/to/project --rpi-bin /path/to/rpi --assets ./assets --port 3030
+```
+
+Open [http://127.0.0.1:3030/](http://127.0.0.1:3030/), select a project, and create a session. On Windows, use `rpi-web.exe` and `rpi.exe`.
+
+The [Web user guide](packages/rpi-web/README.md) covers Windows / Linux / macOS setup, project creation, model credentials, password login, remote access, persistence, and upgrades. Web 0.1.7 uses `rpi --webserver` to start the native extension with embedded frontend resources; `--web` remains a compatibility alias. Install it with `rpi install rpi-web --github pi-rust/rpi-package`, or from a checkout using `rpi install rpi-web --path packages/rpi-web`.
+
+Web 0.1.1 supports `.rpi/web.json` startup settings. Run `rpi-web --init` once in a project directory, configure the host and assets paths, then use `rpi-web` for subsequent starts. Global defaults can be stored in `~/.rpi/web.json`, and CLI arguments provide temporary overrides. Users of Web 0.1.0 must upgrade to use configuration files.
+
+## Shared backend and HTTP API
+
+`rpi-extcore` now holds the common ACP/Web native RPC, run, session, history, event and workspace capabilities. `rpi-http` adapts those services to the existing HTTP/SSE API and provides an API-only executable. `rpi-web` adds the embedded browser frontend; `rpi-acp` maps the common runtime to ACP.
+
+```bash
+cargo run --locked -p rpi-http -- --project /path/to/project --rpi-bin /path/to/rpi --port 3030
+```
+
+`rpi-extcore` is also published as a reusable crates.io library. Applications
+can depend on the compatible minor line with `rpi-extcore = "0.1"`; it requires
+Rust 1.78+ and a compatible native `rpi --mode rpc` executable at runtime. See
+[rpi-extcore](packages/rpi-extcore/README.md), [rpi-http](packages/rpi-http/README.md) and the [architecture contract](docs/architecture/extension-core.md). The new packages are ordinary Rust libraries; existing extension installation and startup commands remain the same.
+
 ## Native ACP integration
 
 `rpi-acp` contains the ACP protocol, session history, streaming, question handling
