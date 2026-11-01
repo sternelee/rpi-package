@@ -1,0 +1,26 @@
+[package]
+name = "rpi-remote"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Remote control and local agent mesh for the rpi coding agent"
+readme = "README.md"
+keywords = ["rpi", "remote", "agent-mesh", "broker", "uds"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rpi-plugin-sdk = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+# Time-ordered envelope ids (UUID v7).
+uuid = { version = "1", features = ["v7"] }
+thiserror = "1"
+# Room-id derivation (`sha256`) and the base64 forms used on the wire.
+sha2 = "0.10"
+base64 = "0.22"
